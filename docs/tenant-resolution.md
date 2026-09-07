@@ -44,10 +44,14 @@ organization names or a map keyed by name with an `id` inside:
 "organization": { "acme-corp": { "id": "f8d3c4e1-..." } }
 ```
 
-`KeycloakOrganizationClaimResolver` prefers the id from the map form and falls back to the
-name when only the array form is present. If a user belongs to more than one organization,
-the first entry is used — Keycloak has no single "active organization" at the token level,
-so disambiguating further is left to the caller.
+More than one organization in the map form is refused rather than guessed at: a JSON object
+parses into a `HashMap`, whose iteration order is not token order, so "pick the first one"
+would silently attach a request to an arbitrary organization. `Optional.empty()` is returned
+instead, and strict mode turns that into a 400.
+
+The id vs. name choice is tied to a Keycloak admin setting ("Add organization id" on the
+mapper). Flipping that setting after tenants already have data keyed by the old value will
+make that data invisible under the new one — pin the setting, do not toggle it later.
 
 Clerk and WorkOS also carry an org id (`o.id` and `org_id` respectively) but are not covered
 by a preset yet; `JwtClaimTenantResolver` handles WorkOS's flat claim directly, and Clerk's
