@@ -14,6 +14,45 @@ spoofable header should never outrank a signed claim.
 | `SUBDOMAIN` | the first label of the host | `tenantlayer.base-domain` |
 | `PATH` | a path segment, `/t/{tenant}/...` | `tenantlayer.path-prefix` (default `/t`) |
 
+## Provider presets
+
+The `JWT` resolver reads one configurable claim, which is enough when you control the
+token shape. Identity providers do not agree on where the tenant id lives, so two thin
+presets exist for the common cases:
+
+| Provider | Class | Claim shape |
+|---|---|---|
+| Auth0 | `AuthPresets.forAuth0()` | flat `org_id` string |
+| Keycloak | `new KeycloakOrganizationClaimResolver()` | nested `organization` object or array |
+
+```java
+@Bean
+TenantResolver<HttpServletRequest> tenantResolver() {
+    return AuthPresets.forAuth0();
+}
+```
+
+Auth0's Organizations feature puts the org id in a flat `org_id` claim, so it is just the
+existing `JwtClaimTenantResolver` pointed at that claim name.
+
+Keycloak's built-in Organizations feature (26+) is not a flat claim. Depending on how the
+Organization Membership Mapper is configured, the token carries either a plain array of
+organization names or a map keyed by name with an `id` inside:
+
+```json
+"organization": ["acme-corp"]
+"organization": { "acme-corp": { "id": "f8d3c4e1-..." } }
+```
+
+`KeycloakOrganizationClaimResolver` prefers the id from the map form and falls back to the
+name when only the array form is present. If a user belongs to more than one organization,
+the first entry is used — Keycloak has no single "active organization" at the token level,
+so disambiguating further is left to the caller.
+
+Clerk and WorkOS also carry an org id (`o.id` and `org_id` respectively) but are not covered
+by a preset yet; `JwtClaimTenantResolver` handles WorkOS's flat claim directly, and Clerk's
+nested `o` claim would need the same kind of resolver as Keycloak's.
+
 ## Strict mode
 
 ```properties
