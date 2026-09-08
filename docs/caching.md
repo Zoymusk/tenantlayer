@@ -12,6 +12,23 @@ trusted control cannot help with.
 This is the one place where TenantLayer enforces isolation in Java rather than deferring
 to the database, because there is nothing else that can.
 
+### The bug, concretely
+
+```java
+@Cacheable("orders")
+public List<Order> recentOrders() {
+    return orders.findRecent();     // correctly scoped by the policy...
+}
+```
+
+```
+acme    GET /orders   → miss → query runs → acme's rows → cached under key "recentOrders"
+globex  GET /orders   → HIT  → acme's rows returned
+```
+
+The second request never reaches Postgres, so the policy is never consulted. Every other
+layer in this library did its job; the answer still crossed tenants.
+
 ## What it does
 
 Wrap nothing, configure nothing. If a `CacheManager` exists, TenantLayer wraps it and
@@ -69,9 +86,42 @@ Spring's `Cache` interface cannot enumerate keys, so eviction by tenant has to r
 native cache. Providers whose native cache is a `Map` — the default `ConcurrentMapCache`,
 and Caffeine — are handled.
 
-**Anything else throws rather than silently doing nothing.** For Redis, the equivalent is a
-`SCAN` over `tenant::*` and you should implement it. A no-op eviction is worse than an
-error, because you would believe the data was gone.
+**Anything else throws rather than silently doing nothing.** A no-op eviction is worse than
+an error, because you would believe the data was gone.
+
+For Redis, the equivalent is a `SCAN` over the tenant's prefix. Publish a
+`TenantCacheEvictor` bean and yours is used instead:
+
+`TenantCacheEvictor` is a class rather than an interface, and it is registered with
+`@ConditionalOnMissingBean` — so override `evictTenant` and publish your own:
+
+```java
+@Bean
+TenantCacheEvictor tenantCacheEvictor(CacheManager cacheManager, StringRedisTemplate redis) {
+    return new TenantCacheEvictor(cacheManager) {
+        @Override
+        public int evictTenant(String tenantId) {
+            // Keys carry the tenant, so one prefix covers all of that tenant's entries.
+            ScanOptions options = ScanOptions.scanOptions()
+                    .match(tenantId + "::*")
+                    .count(500)
+                    .build();
+
+            int removed = 0;
+            try (Cursor<String> keys = redis.scan(options)) {
+                while (keys.hasNext()) {
+                    redis.delete(keys.next());
+                    removed++;
+                }
+            }
+            return removed;
+        }
+    };
+}
+```
+
+`SCAN` rather than `KEYS` deliberately — `KEYS` blocks Redis for the duration, which on a
+large keyspace takes production down while you suspend one tenant.
 
 ## `clear()` still clears everything
 
@@ -88,6 +138,30 @@ tenantlayer.cache.enabled=false
 
 Only if you are keying by tenant yourself. If you are not, this is the fastest way to
 introduce a cross-tenant read into an otherwise correct application.
+
+## Proving it
+
+The test that matters is the one that fails if the qualification is removed:
+
+```java
+@Test
+void oneTenantsCachedResultIsNotServedToAnother() {
+    List<Order> acme = TenantContext.callWithTenant(
+            TenantScope.of("acme"), () -> service.recentOrders());
+    assertThat(acme).isNotEmpty();
+
+    List<Order> globex = TenantContext.callWithTenant(
+            TenantScope.of("globex"), () -> service.recentOrders());
+
+    assertThat(globex)
+            .as("globex was served acme's cached result")
+            .doesNotContainAnyElementsOf(acme);
+}
+```
+
+Make it fail first: add `orders` to `tenantlayer.cache.shared` and confirm it goes red. If
+it still passes, the cache was never hit and the test proves nothing — which is the usual
+reason a cache-isolation test is vacuous.
 
 ## Configuration
 

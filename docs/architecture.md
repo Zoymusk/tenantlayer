@@ -114,8 +114,9 @@ public interface TenantResolver<S> {
 }
 
 // Back membership with a database table, mTLS, an internal token.
+// The caller comes from the SecurityContext, so only the tenant is passed.
 public interface TenantMembershipVerifier {
-    boolean isMember(String tenantId, Authentication authentication);
+    boolean isMember(String tenantId);
 }
 
 // Keep tenants somewhere other than a table.

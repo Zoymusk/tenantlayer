@@ -193,10 +193,15 @@ implement `TenantMembershipVerifier`:
 ```java
 @Bean
 TenantMembershipVerifier tenantMembershipVerifier(MembershipRepository memberships) {
-    return (tenantId, authentication) ->
-            memberships.exists(authentication.getName(), tenantId);
+    return tenantId -> {
+        Authentication caller = SecurityContextHolder.getContext().getAuthentication();
+        return caller != null && memberships.exists(caller.getName(), tenantId);
+    };
 }
 ```
+
+It takes only the tenant — the caller comes from the `SecurityContext`, which Spring
+Security has already populated by the time this runs.
 
 Returning `false` produces a 403. See [securing resolution](securing-resolution.md).
 

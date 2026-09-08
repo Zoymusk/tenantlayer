@@ -54,54 +54,51 @@ observed deterministically rather than occasionally.
 
 ## A complete test class
 
-Everything above, in one file you can copy:
+`TenantPostgres` is a standalone fixture — it does not need a Spring context, which keeps
+isolation tests fast and keeps them testing the database rather than your wiring:
 
 ```java
-@SpringBootTest
-@Testcontainers
-class OrderIsolationTest {
+class ReportIsolationTest {
 
-    static final TenantPostgres POSTGRES = TenantPostgres.start()
-            .withTenantTable("orders", "item varchar(255) not null")
-            .withRegistry("acme", "globex");
+    private static TenantPostgres postgres;
+    private static DataSource application;
 
-    @DynamicPropertySource
-    static void datasource(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES::getApplicationUsername);
-        registry.add("spring.datasource.password", POSTGRES::getApplicationPassword);
-        // Boot auto-configures Flyway from the classpath alone; this test is not about migrations.
-        registry.add("spring.flyway.enabled", () -> "false");
+    @BeforeAll
+    static void startDatabase() {
+        postgres = TenantPostgres.start()
+                .withTenantTable("reports", "title varchar(255) not null")
+                .withRegistry("acme", "globex");
+        // One connection, so a tenant left behind on a recycled connection is
+        // observed every time rather than occasionally.
+        application = postgres.applicationDataSource(1);
     }
-
-    @Autowired
-    private OrderRepository orders;
 
     @BeforeEach
     void seed() {
-        POSTGRES.seedRow("orders", "acme",   Map.of("item", "laptop"));
-        POSTGRES.seedRow("orders", "globex", Map.of("item", "monitor"));
-        IsolationAssertions.bind(POSTGRES.applicationDataSource(), POSTGRES.privilegedDataSource());
-        IsolationAssertions.bindTable("orders", "tenant_id");
+        postgres.execute("truncate table reports restart identity");
+        postgres.seedRow("reports", "acme",   Map.of("title", "acme q3"));
+        postgres.seedRow("reports", "globex", Map.of("title", "globex q3"));
+
+        IsolationAssertions.bind(application, postgres.privilegedDataSource());
+        IsolationAssertions.bindTable("reports", "tenant_id");
+    }
+
+    @AfterEach
+    void clearContext() {
+        TenantContext.clear();
     }
 
     @Test
     @WithTenant("acme")
-    void acmeSeesOnlyItsOwnOrders() {
-        assertThat(orders.findAll()).isNotEmpty();
+    void acmeSeesOnlyItsOwnReports() {
         assertTenantCannotSee("globex");
-    }
-
-    @Test
-    @WithTenant("acme")
-    void writesAreStampedWithTheActingTenant() {
-        Order saved = orders.save(new Order("keyboard"));
-
-        // The application never set this. The connection's tenant did.
-        assertThat(saved.getTenantId()).isEqualTo("acme");
     }
 }
 ```
+
+`withTenantTable` creates the table, the index, `FORCE ROW LEVEL SECURITY` and a correctly
+guarded policy — so the fixture cannot pass for the wrong reason, which is the usual way an
+isolation suite goes green while proving nothing.
 
 ## Testing over HTTP
 
