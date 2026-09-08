@@ -34,6 +34,115 @@ matches no rows. Absence of a tenant returns nothing, never everything.
 Session scope (`is_local = false`) rather than `SET LOCAL`, because `SET LOCAL` only
 survives inside an explicit transaction and plenty of reads run in autocommit.
 
+## A worked example, end to end
+
+Everything below is the whole setup — one table, one policy, one entity, and nothing in the
+application code that mentions a tenant.
+
+**The table and its policy.** The tenant column is filled in by the database from the
+connection's current tenant, so application code cannot set it wrongly or forget it:
+
+```sql
+create table orders (
+    id           bigserial primary key,
+    -- The application never writes this. The connection's tenant fills it in.
+    tenant_id    varchar(64)  not null default current_setting('tenantlayer.tenant', true),
+    customer     varchar(255) not null,
+    amount_cents bigint       not null
+);
+
+create index idx_orders_tenant on orders (tenant_id);
+
+alter table orders enable row level security;
+alter table orders force row level security;
+
+create policy tenant_isolation on orders
+    using (tenant_id = nullif(current_setting('tenantlayer.tenant', true), ''));
+```
+
+**The role your application connects as** — neither superuser nor table owner, or the
+policy is never applied:
+
+```sql
+create role orders_app login password '...';
+grant select, insert, update, delete on orders to orders_app;
+grant usage, select on all sequences in schema public to orders_app;
+```
+
+**The entity.** Note the absence: no tenant field to set, no `@Where`, no filter:
+
+```java
+@Entity
+@Table(name = "orders")
+public class Order {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String customer;
+
+    @Column(name = "amount_cents")
+    private long amountCents;
+
+    // Written by the database, read back after insert. Never set by this class.
+    @Generated(event = EventType.INSERT)
+    @Column(name = "tenant_id", insertable = false, updatable = false)
+    private String tenantId;
+}
+```
+
+**The repository and the controller** — ordinary Spring Data, with no tenancy logic:
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> { }
+
+@RestController
+@RequestMapping("/orders")
+class OrderController {
+
+    private final OrderRepository orders;
+
+    OrderController(OrderRepository orders) {
+        this.orders = orders;
+    }
+
+    @GetMapping
+    List<Order> list() {
+        // Returns only the acting tenant's rows. The policy does that, not this method.
+        return orders.findAll();
+    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    Order place(@RequestBody Order order) {
+        return orders.save(order);
+    }
+}
+```
+
+`findAll()` really does mean *all* — and the database returns only the rows the connection
+is allowed to see. That is the whole point: there is no query you can write, in JPA or in
+raw SQL, that reaches another tenant's rows on this connection.
+
+**Proving it**, which matters more than the setup:
+
+```java
+@Test
+void oneTenantCannotSeeAnother() {
+    TenantContext.runWithTenant(TenantScope.of("acme"), () ->
+            orders.save(new Order("Wile E. Coyote", 4999)));
+
+    List<Order> asGlobex = TenantContext.callWithTenant(
+            TenantScope.of("globex"), () -> orders.findAll());
+
+    assertThat(asGlobex).isEmpty();
+}
+```
+
+If someone drops the policy, that test fails. If someone connects as the table owner
+without `FORCE`, it fails. That is the test to write first.
+
 ## The three mistakes
 
 ### 1. Forgetting `FORCE ROW LEVEL SECURITY`
