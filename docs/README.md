@@ -65,7 +65,10 @@ of it.
 | [Isolation strategies](isolation-strategies.md) | Row-level security, schema-per-tenant, database-per-tenant, and the discriminator column |
 | [Tenant resolution](tenant-resolution.md) | Headers, subdomains, paths, JWT claims, precedence, and writing your own |
 | [Securing resolution](securing-resolution.md) | Why a header alone is not enough, and how to close that |
-| [Context propagation](context-propagation.md) | @Async, CompletableFuture, virtual threads, scheduled jobs, HTTP, Kafka |
+| [Context propagation](context-propagation.md) | The overview: every boundary the tenant has to cross |
+| [Async, threads and scheduling](async-and-threads.md) | @Async, virtual threads, CompletableFuture, your own executors, @Scheduled, parallel streams |
+| [Outbound HTTP](http-clients.md) | RestClient, RestTemplate, WebClient and Feign — and the builder mistake that silently drops the header |
+| [Kafka](kafka.md) | Produce, consume, batch listeners, and the retained tenant that causes cross-tenant writes |
 | [The tenant registry](tenant-registry.md) | Who your tenants are, and running work for each of them |
 | [Migrations](migrations.md) | Running Flyway across tenants, and the Boot setting you must turn off first |
 | [Caching](caching.md) | The one hole row-level security cannot cover, and how it is closed |
