@@ -21,6 +21,66 @@ in the README.
 | Kafka produce | Producer interceptor, tenant written to a record header |
 | Kafka consume | Record interceptor, tenant restored before the listener |
 
+Each of those needs no code from you. The examples below show what that looks like in
+practice, and what the failure would have been.
+
+### @Async
+
+```java
+@Service
+class ReportService {
+
+    @Async
+    public void rebuild() {
+        // Runs on a pool thread. The tenant that made the request is still bound,
+        // so this reads that tenant's rows and nobody else's.
+        reports.regenerate();
+    }
+}
+```
+
+Without the decorator this method runs with no tenant, the query returns zero rows, and the
+report is silently empty rather than wrong — which is why it goes unnoticed.
+
+### Calling another service
+
+```java
+@Service
+class BillingClient {
+
+    private final RestClient http;
+
+    BillingClient(RestClient.Builder builder) {
+        this.http = builder.baseUrl("https://billing.internal").build();
+    }
+
+    Invoice latest() {
+        // X-Tenant-ID is attached automatically, from whatever tenant is bound.
+        return http.get().uri("/invoices/latest").retrieve().body(Invoice.class);
+    }
+}
+```
+
+The same applies to `RestTemplate`, `WebClient` and Feign. The header name is
+`tenantlayer.header`, so both ends of the call agree by configuration rather than by
+convention.
+
+### Producing to Kafka
+
+```java
+kafka.send("orders", order);   // tenant written to a record header
+```
+
+And consuming it:
+
+```java
+@KafkaListener(topics = "orders")
+void handle(Order order) {
+    // The tenant from the record header is bound before this runs.
+    service.handle(order);
+}
+```
+
 ### Virtual threads deserve a note
 
 Setting `spring.threads.virtual.enabled=true` makes Boot build a `SimpleAsyncTaskExecutor`
@@ -57,7 +117,44 @@ and an overloaded `capture(...)` is ambiguous at exactly the call sites people w
 ### Scheduled jobs
 
 A `@Scheduled` method runs on a scheduler thread no filter ever touched, so there is no
-tenant. See [The tenant registry](tenant-registry.md) for `forEachTenant`.
+tenant — and no request to take one from. Iterate the tenants you have:
+
+```java
+@Component
+class NightlyRollup {
+
+    private final TenantTasks tenants;
+    private final RollupService rollups;
+
+    NightlyRollup(TenantTasks tenants, RollupService rollups) {
+        this.tenants = tenants;
+        this.rollups = rollups;
+    }
+
+    @Scheduled(cron = "0 0 2 * * *")
+    void run() {
+        // Bound to each tenant in turn, from the registry.
+        tenants.forEachTenant(tenantId -> rollups.rebuild());
+    }
+}
+```
+
+`forEachTenant` keeps going when one tenant fails and throws at the end with every failure
+attached, so one bad tenant does not silently skip the rest of the night's work.
+
+To collect a result per tenant, use `mapEachTenant`:
+
+```java
+Map<String, Integer> counts = tenants.mapEachTenant(tenantId -> orders.countOpen());
+```
+
+And for a single known tenant — an admin action, a replay, a fix-up script:
+
+```java
+tenants.runAs("acme", () -> orders.reprice());
+```
+
+See [the tenant registry](tenant-registry.md) for where that list of tenants comes from.
 
 ### Kafka batch listeners
 

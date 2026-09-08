@@ -16,6 +16,25 @@ checks it, you have tenant isolation against accidents and none against people.
 This is acceptable in exactly one shape: behind a gateway that **overwrites** the header on
 every inbound request (not one that merely sets it when absent). Anywhere else it is not.
 
+The distinction is the whole thing. In nginx:
+
+```nginx
+# Right — whatever the client sent is discarded.
+proxy_set_header X-Tenant-ID $tenant_from_jwt;
+
+# Wrong — a client-supplied header survives and is trusted downstream.
+proxy_pass_request_headers on;
+```
+
+Spring Cloud Gateway, the same idea:
+
+```java
+// setRequestHeader replaces. addRequestHeader would append to what the caller sent.
+.route("api", r -> r.path("/api/**")
+        .filters(f -> f.setRequestHeader("X-Tenant-ID", tenantFromToken()))
+        .uri("http://orders"))
+```
+
 ## Two defences, and you want both
 
 ### Precedence — resolve from a signed claim
@@ -76,3 +95,75 @@ TenantMembershipVerifier verifier(MembershipRepository memberships) {
 
 Return `false` when you cannot tell. "I do not know" and "yes" must never be the same
 answer.
+
+A database-backed version, since that is the common case once tenants and users are real
+records rather than claims:
+
+```java
+@Bean
+TenantMembershipVerifier tenantMembershipVerifier(MembershipRepository memberships) {
+    return tenantId -> {
+        Authentication caller = SecurityContextHolder.getContext().getAuthentication();
+        if (caller == null || !caller.isAuthenticated()) {
+            return false;                 // unauthenticated is not "allowed"
+        }
+        return memberships.exists(caller.getName(), tenantId);
+    };
+}
+```
+
+The verifier receives only the tenant — the caller comes from the `SecurityContext`, which
+Spring Security has populated by the time this runs.
+
+You can also combine it with the registry, so a suspended tenant is refused at the door
+rather than merely skipped by background jobs:
+
+```java
+@Bean
+TenantMembershipVerifier tenantMembershipVerifier(
+        MembershipRepository memberships, TenantRegistry registry) {
+    return tenantId -> registry.find(tenantId).map(TenantRegistration::isActive).orElse(false)
+            && memberships.exists(currentPrincipalName(), tenantId);
+}
+```
+
+## Proving it
+
+The test that matters is the one where a caller claims a tenant they do not hold:
+
+```java
+@Test
+void aCallerCannotClaimATenantTheyDoNotBelongTo() {
+    // Token is valid, and lists only acme.
+    HttpHeaders headers = new HttpHeaders();
+    headers.setBearerAuth(tokenFor("user-1", List.of("acme")));
+    headers.set("X-Tenant-ID", "globex");
+
+    ResponseEntity<String> response = http.exchange(
+            "/orders", HttpMethod.GET, new HttpEntity<>(headers), String.class);
+
+    assertThat(response.getStatusCode())
+            .as("a token for acme reached globex")
+            .isEqualTo(HttpStatus.FORBIDDEN);
+}
+```
+
+Note the assertion is **403 and not an empty list**. If membership is not wired up, this
+request succeeds and returns globex's data — and a test asserting "the response is empty"
+would pass on a fresh database, which is how this gets shipped.
+
+Then turn membership off and confirm the test fails. If it still passes, it was never
+testing membership.
+
+## The two questions, side by side
+
+| | Resolution | Membership |
+|---|---|---|
+| Answers | Which tenant does this request claim? | Is this caller entitled to it? |
+| Reads | Header, subdomain, path, token claim | The authenticated principal |
+| Fails with | 400 (strict mode) | 403 |
+| Configured by | `tenantlayer.resolvers` | `tenantlayer.membership.enabled` |
+| Enough on its own | Only behind a header-overwriting gateway | — |
+
+A public API needs both. An internal service behind a trust boundary can get away with the
+first, right up until the day it is exposed — which is rarely a decision anyone announces.

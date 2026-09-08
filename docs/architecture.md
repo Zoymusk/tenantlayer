@@ -11,6 +11,29 @@ The important property is that **nothing in the middle knows about tenancy**. Yo
 controller, service and repository are written as if the application had one customer. The
 tenant is established before them and enforced after them.
 
+Concretely, one request:
+
+```
+GET /orders            X-Tenant-ID: acme
+  │
+  ├─ Spring Security authenticates                (optional)
+  ├─ TenantFilter                                  resolve → "acme"
+  │                                                verify   → is this caller entitled to it?
+  │                                                bind     → TenantContext = "acme"
+  │
+  ├─ OrderController.list()                        ← your code. Knows nothing about tenants.
+  ├─ OrderRepository.findAll()                     ← "select * from orders", unfiltered
+  │
+  ├─ TenantAwareDataSource.getConnection()         select set_config('tenantlayer.tenant','acme',false)
+  └─ Postgres                                      policy applies → acme's rows only
+                                                   ↑ the only component that ENFORCES
+  │
+  └─ TenantFilter unwinds                          TenantContext cleared, always
+```
+
+The important property is that the two lines marked *your code* are unchanged from a
+single-tenant application. Isolation is established before them and enforced after them.
+
 ## Components, and what each is responsible for
 
 | Component | Responsibility | Fails how |
@@ -53,6 +76,17 @@ Setting it on *every* checkout means a connection can never be **used** carrying
 tenant, because the value is overwritten before the borrower can issue a statement. It is
 also one round trip instead of two.
 
+This is the entire mechanism, run before the borrower sees the connection:
+
+```sql
+select set_config('tenantlayer.tenant', 'acme', false)
+```
+
+Parameterised, never interpolated — the tenant identifier may have arrived in an HTTP
+header, and building that statement by concatenation would be SQL injection with
+attacker-controlled input. `false` means session scope rather than transaction scope; see
+below.
+
 ### No tenant is written as the empty string, not left alone
 
 With nothing bound, the setting is written as `''`. The generated policy compares against
@@ -70,12 +104,41 @@ without requiring every read to be transactional.
 
 ## Extension points
 
-Each of these is one interface, and defining a bean makes the autoconfiguration back off:
+Each is one interface, and defining a bean makes the autoconfiguration back off. None of
+them requires subclassing anything or extending a base class:
 
-- **`TenantResolver<S>`** — resolve from an API key, an mTLS certificate, a message header
-- **`TenantMembershipVerifier`** — back membership with a database table, mTLS, an internal token
-- **`TenantContextStorage`** — swap where the tenant is kept
-- **`TenantRegistry`** — keep tenants somewhere other than a table
+```java
+// Resolve from an API key, an mTLS certificate, a message header.
+public interface TenantResolver<S> {
+    Optional<String> resolve(S source);
+}
+
+// Back membership with a database table, mTLS, an internal token.
+// The caller comes from the SecurityContext, so only the tenant is passed.
+public interface TenantMembershipVerifier {
+    boolean isMember(String tenantId);
+}
+
+// Keep tenants somewhere other than a table.
+public interface TenantRegistry {
+    Optional<TenantRegistration> find(String tenantId);
+    List<String> activeTenantIds();
+    // ...
+}
+
+// Choose the connection itself — this is how database-per-tenant works.
+public interface TenantConnectionStrategy {
+    Connection getConnection() throws SQLException;
+    String name();
+    // Methods added later are `default`, because you implement this.
+}
+```
+
+`TenantContextStorage` is the fifth, for swapping where the tenant physically lives — see
+[context storage](context-storage.md).
+
+A one-line example of each is in [tenant resolution](tenant-resolution.md#writing-your-own)
+and [isolation strategies](isolation-strategies.md).
 
 ## What is deliberately not in the path
 

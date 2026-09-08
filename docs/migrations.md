@@ -31,6 +31,67 @@ migrations.migrate("acme");                           // just one
 tenantlayer.migration.locations=classpath:db/tenant-migration
 ```
 
+### A worked migration
+
+Tenant migrations live apart from shared ones, because they run a different number of times:
+
+```
+src/main/resources/db/
+├── shared/                    # run once — the registry, reference data
+│   └── V1__registry.sql
+└── tenant-migration/          # run per tenant under schema- or database-per-tenant
+    ├── V1__orders.sql
+    └── V2__add_order_status.sql
+```
+
+```sql
+-- V1__orders.sql — no schema qualifier. The runner sets the schema or picks the database.
+create table orders (
+    id           bigserial primary key,
+    tenant_id    varchar(64)  not null default current_setting('tenantlayer.tenant', true),
+    customer     varchar(255) not null,
+    amount_cents bigint       not null
+);
+
+create index idx_orders_tenant on orders (tenant_id);
+
+alter table orders enable row level security;
+alter table orders force row level security;
+
+create policy tenant_isolation on orders
+    using (tenant_id = nullif(current_setting('tenantlayer.tenant', true), ''));
+```
+
+Leave the tables unqualified. Under schema-per-tenant the runner sets `search_path` and
+`createSchemas`, and under database-per-tenant it points Flyway at that tenant's own
+datasource — qualifying a table with a schema name defeats both.
+
+### Running them on deploy
+
+```java
+@Component
+class MigrateOnStartup implements ApplicationRunner {
+
+    private final TenantMigrationRunner migrations;
+
+    MigrateOnStartup(TenantMigrationRunner migrations) {
+        this.migrations = migrations;
+    }
+
+    @Override
+    public void run(ApplicationArguments args) {
+        MigrationOutcome outcome = migrations.migrateAll();
+        log.info("migrated {} tenants", outcome.migrated().size());
+    }
+}
+```
+
+And for a single tenant, which is what onboarding needs:
+
+```java
+migrations.migrate("acme");
+```
+
 ## It asks the strategy rather than assuming
 
 Under a **shared schema** — which is what row-level security uses — there is one set of
@@ -97,3 +158,14 @@ or number your first real migration V2.
 Keep tenant migrations **out of `classpath:db/migration`** — that is Boot's default
 location, and anything there is picked up by the automatic single-schema migration you
 turned off above, should it ever be turned back on.
+
+## Database-per-tenant
+
+Each tenant has its own database, so migrations run once per tenant against that tenant's
+own datasource rather than once against a shared one. The runner asks the strategy
+(`migratesPerTenant()`) rather than inferring it from the schema — under
+`DATABASE_PER_TENANT` every tenant uses the same schema *name*, so deciding from the schema
+alone would migrate one database and silently leave every other tenant on an old version.
+
+A tenant with no configured database is not skipped quietly: it fails, and the failure names
+the tenant.

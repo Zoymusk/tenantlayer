@@ -25,13 +25,87 @@ before any tenant is known. A policy on this table would hide it from the very c
 job is to read it, and the application would not start. Every other table in your schema
 should have one; this one must not.
 
-## Columns nothing reads yet
+## Columns, and which are read
 
-`region` and `tenant_group` are unused in v0.1 and present anyway. A registry is the
+| Column | Read by | Meaning |
+|---|---|---|
+| `tenant_id` | everything | The identifier resolution produces |
+| `status` | `forEachTenant`, membership | `ACTIVE` or `SUSPENDED`. Suspended tenants are skipped by iteration. |
+| `datasource_ref` | `DATABASE_PER_TENANT` | Which database this tenant lives in — several tenants may share one |
+| `region`, `tenant_group` | nothing yet | Reserved |
+| `metadata` | your code | Anything you want to hang off a tenant |
+
+`region` and `tenant_group` are present although nothing reads them. A registry is the
 hardest table in the system to change once it holds production rows — adding a column later
 means a migration on every deployment plus a backfill nobody has the data for. Both are
-nullable and cost a schema no one has to alter twice. `datasource_ref` is the same argument
-for schema- and database-per-tenant routing.
+nullable and cost a schema no one has to alter twice.
+
+`datasource_ref` was the same argument until 0.3.0, and is now the routing key for
+[database-per-tenant](isolation-strategies.md): a tenant with a reference uses the database
+configured under that name, and a tenant without one uses its own id.
+
+## Reading and writing it
+
+```java
+@Autowired TenantRegistry registry;
+
+// Everything about one tenant
+Optional<TenantRegistration> acme = registry.find("acme");
+
+// Just the ids of the active ones — what forEachTenant iterates
+List<String> active = registry.activeTenantIds();
+```
+
+Registering a new tenant is an insert like any other:
+
+```java
+registry.save(TenantRegistration.of("acme"));
+
+// Or with a shard and some metadata of your own
+registry.save(new TenantRegistration(
+        "globex",
+        TenantStatus.ACTIVE,
+        "eu-west-1",
+        "enterprise",
+        "shard-a",                       // datasource_ref
+        Map.of("plan", "enterprise")));
+```
+
+Suspending a tenant is a status change, and iteration stops including them immediately:
+
+```java
+registry.find("acme").ifPresent(t -> registry.save(
+        new TenantRegistration(t.tenantId(), TenantStatus.SUSPENDED,
+                t.region(), t.group(), t.datasourceRef(), t.metadata())));
+```
+
+> Suspending does **not** evict what is already cached. See
+> [caching](caching.md#evicting-one-tenant) — otherwise a suspended tenant's data stays
+> readable until entries expire, which makes "suspended" mean less than it sounds.
+
+## Keeping tenants somewhere else
+
+`TenantRegistry` is an interface. If your tenants live in another service, or a
+configuration file, or a table with a different shape, publish a bean and the
+autoconfigured JDBC one backs off:
+
+```java
+@Bean
+TenantRegistry tenantRegistry(CustomerApi customers) {
+    return new TenantRegistry() {
+        @Override
+        public List<String> activeTenantIds() {
+            return customers.activeAccountIds();
+        }
+
+        @Override
+        public Optional<TenantRegistration> find(String tenantId) {
+            return customers.lookup(tenantId).map(c -> TenantRegistration.of(c.id()));
+        }
+        // save / delete / findAll as your source allows
+    };
+}
+```
 
 ## Running work for every tenant
 
@@ -68,3 +142,18 @@ tenantTasks.runAs("acme", () -> reportService.rebuild());
 
 The scheduler thread is left exactly as it was found — schedulers pool their threads, and a
 job that leaves a tenant behind hands it to the next job on that thread.
+
+### Handling the failures
+
+```java
+try {
+    tenantTasks.forEachTenant(tenant -> reportService.rebuild());
+} catch (TenantIterationException e) {
+    // Named, in registry order — so the alert says which tenants failed, not that some did.
+    e.failures().forEach((tenant, cause) ->
+            log.error("nightly rebuild failed for {}", tenant, cause));
+}
+```
+
+The tenants that succeeded stay succeeded. The exception is thrown after every tenant has
+been attempted, not on the first failure.
