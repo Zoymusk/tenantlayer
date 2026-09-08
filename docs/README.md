@@ -39,6 +39,10 @@ ORM.
 **Setting up a new application** — [Getting started](getting-started.md), then
 [Row-level security](row-level-security.md) before you deploy anything. Twenty minutes.
 
+**Building something specific** — [Recipes](recipes.md) has complete, working answers to
+onboarding a tenant, suspending one, running a nightly job across all of them, serving an
+admin endpoint that spans tenants, and the rest.
+
 **Adding it to a running system** — [Adopting in an existing app](adopting-in-an-existing-app.md).
 It is designed to go on gradually rather than as a flag day.
 
@@ -56,6 +60,7 @@ of it.
 | Guide | What it answers |
 |---|---|
 | [Getting started](getting-started.md) | Adding the dependency and getting isolation in ten minutes |
+| [Recipes](recipes.md) | Complete solutions: onboarding, suspension, nightly jobs, admin endpoints, Kafka, migrations |
 | [Row-level security](row-level-security.md) | How isolation is actually enforced, the whole setup end to end, and the three mistakes that quietly break it |
 | [Isolation strategies](isolation-strategies.md) | Row-level security, schema-per-tenant, database-per-tenant, and the discriminator column |
 | [Tenant resolution](tenant-resolution.md) | Headers, subdomains, paths, JWT claims, precedence, and writing your own |
