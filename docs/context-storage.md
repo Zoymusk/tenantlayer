@@ -43,10 +43,79 @@ Propagation is explicit instead: decorators capture at submit time and restore a
 
 ## Substituting your own
 
+Three methods, and a contract that matters more than the code:
+
 ```java
-TenantContext.useStorage(new MyStorage());
+public class DiagnosticTenantStorage implements TenantContextStorage {
+
+    private static final Logger log = LoggerFactory.getLogger(DiagnosticTenantStorage.class);
+    private final ThreadLocal<TenantScope> current = new ThreadLocal<>();
+
+    @Override
+    public TenantScope get() {
+        return current.get();          // null means "no tenant" — never a default
+    }
+
+    @Override
+    public void set(TenantScope scope) {
+        TenantScope previous = current.get();
+        if (previous != null && scope != null && !previous.subject().equals(scope.subject())) {
+            // A thread changing tenant without unwinding first is worth knowing about.
+            log.warn("tenant changed from {} to {} on {} without a clear()",
+                    previous.subject(), scope.subject(), Thread.currentThread().getName());
+        }
+        current.set(scope);
+    }
+
+    @Override
+    public void clear() {
+        current.remove();              // remove, not set(null) — a pooled thread keeps the entry
+    }
+}
 ```
 
-Call it once during start-up, before any tenant is bound. An implementation must be safe
-for concurrent use and must never let one thread observe another's tenant. Returning `null`
-from `get()` means "no tenant", which callers on the enforcement path treat as fail-closed.
+```java
+@PostConstruct
+void useDiagnosticStorage() {
+    TenantContext.useStorage(new DiagnosticTenantStorage());
+}
+```
+
+Call it once during start-up, before any tenant is bound.
+
+**The contract:**
+
+- **Safe for concurrent use**, and one thread must never observe another's tenant. This is
+  the whole reason a naive `static TenantScope` fails immediately under load.
+- **`get()` returning `null` means no tenant**, and callers on the enforcement path treat
+  that as fail-closed. Never substitute a default, and never return the last tenant this
+  thread saw.
+- **`clear()` must actually release the entry.** `ThreadLocal.remove()` rather than
+  `set(null)`, or a pooled thread retains a map entry for the life of the pool.
+
+### Testing a replacement
+
+Isolation depends on this class, so test it as the concurrency primitive it is:
+
+```java
+@Test
+void oneThreadNeverSeesAnothersTenant() throws Exception {
+    TenantContextStorage storage = new DiagnosticTenantStorage();
+    storage.set(TenantScope.of("acme"));
+
+    String seenOnAnotherThread = CompletableFuture
+            .supplyAsync(() -> storage.get() == null ? "none" : storage.get().subject())
+            .get(5, SECONDS);
+
+    assertThat(seenOnAnotherThread)
+            .as("a second thread inherited the first thread's tenant")
+            .isEqualTo("none");
+
+    assertThat(storage.get().subject()).isEqualTo("acme");
+    storage.clear();
+    assertThat(storage.get()).isNull();
+}
+```
+
+That test is the one that fails if someone reaches for `InheritableThreadLocal` — which is
+exactly the mistake the section above exists to prevent.

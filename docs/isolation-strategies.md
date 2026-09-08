@@ -1,5 +1,48 @@
 # Isolation strategies
 
+## Choosing one
+
+```properties
+tenantlayer.strategy=ROW_LEVEL_SECURITY     # the default
+tenantlayer.strategy=SCHEMA_PER_TENANT
+tenantlayer.strategy=DATABASE_PER_TENANT
+```
+
+Chosen once at start-up, never per request — selecting it per request would be a way to
+read another tenant's data by changing one property.
+
+| | Tenants share | Isolated by | Migrations | Choose it when |
+|---|---|---|---|---|
+| **Row-level security** | one schema, one pool | a Postgres policy | once | Most SaaS. Start here. |
+| **Schema-per-tenant** | one database, one pool | `search_path` | per tenant | Tenants need different table shapes, or you want per-tenant backup granularity |
+| **Database-per-tenant** | nothing | a separate database and pool | per tenant | Compliance requires physical separation, or one tenant is large enough to want its own hardware |
+
+The discriminator column below is not a fourth option — it is a complement to row-level
+security, and you generally want both.
+
+**What changes in your application:** nothing. No code, no entity annotations, no queries.
+That is the point of the strategy being a property.
+
+**What changes in your operations:** quite a lot. Per-tenant migrations, per-tenant backups,
+and a pool per tenant are real costs. Row-level security has none of them, which is why it
+is the default rather than merely the simplest.
+
+### Switching is not behaviour-preserving
+
+With no tenant bound, each strategy fails differently:
+
+| Strategy | With no tenant |
+|---|---|
+| Row-level security | Empty result set |
+| Schema-per-tenant | Unresolved relation error |
+| Database-per-tenant | Throws before a connection exists |
+
+All three are safe — none of them leaks. But an application that quietly copes with empty
+results will start failing loudly under the other two. That is a property of the switch
+rather than a bug in it, and it is usually a good thing: the loud version is the one that
+tells you a code path was running untenanted all along.
+
+
 ## Discriminator column
 
 Every tenant's rows share a table, separated by a column. The strategy most SaaS starts

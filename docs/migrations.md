@@ -31,6 +31,67 @@ migrations.migrate("acme");                           // just one
 tenantlayer.migration.locations=classpath:db/tenant-migration
 ```
 
+### A worked migration
+
+Tenant migrations live apart from shared ones, because they run a different number of times:
+
+```
+src/main/resources/db/
+├── shared/                    # run once — the registry, reference data
+│   └── V1__registry.sql
+└── tenant-migration/          # run per tenant under schema- or database-per-tenant
+    ├── V1__orders.sql
+    └── V2__add_order_status.sql
+```
+
+```sql
+-- V1__orders.sql — no schema qualifier. The runner sets the schema or picks the database.
+create table orders (
+    id           bigserial primary key,
+    tenant_id    varchar(64)  not null default current_setting('tenantlayer.tenant', true),
+    customer     varchar(255) not null,
+    amount_cents bigint       not null
+);
+
+create index idx_orders_tenant on orders (tenant_id);
+
+alter table orders enable row level security;
+alter table orders force row level security;
+
+create policy tenant_isolation on orders
+    using (tenant_id = nullif(current_setting('tenantlayer.tenant', true), ''));
+```
+
+Leave the tables unqualified. Under schema-per-tenant the runner sets `search_path` and
+`createSchemas`, and under database-per-tenant it points Flyway at that tenant's own
+datasource — qualifying a table with a schema name defeats both.
+
+### Running them on deploy
+
+```java
+@Component
+class MigrateOnStartup implements ApplicationRunner {
+
+    private final TenantMigrationRunner migrations;
+
+    MigrateOnStartup(TenantMigrationRunner migrations) {
+        this.migrations = migrations;
+    }
+
+    @Override
+    public void run(ApplicationArguments args) {
+        MigrationOutcome outcome = migrations.migrateAll();
+        log.info("migrated {} tenants", outcome.migrated().size());
+    }
+}
+```
+
+And for a single tenant, which is what onboarding needs:
+
+```java
+migrations.migrate("acme");
+```
+
 ## It asks the strategy rather than assuming
 
 Under a **shared schema** — which is what row-level security uses — there is one set of
