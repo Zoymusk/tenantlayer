@@ -6,7 +6,7 @@
 <dependency>
   <groupId>io.tenantlayer</groupId>
   <artifactId>tenantlayer-spring-boot-starter</artifactId>
-  <version>0.1.0</version>
+  <version>0.3.0</version>
 </dependency>
 ```
 

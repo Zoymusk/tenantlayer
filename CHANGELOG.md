@@ -4,7 +4,7 @@ Notable changes per release. This project follows [semantic versioning](https://
 with the usual 0.x caveat: breaking changes may land in any 0.x release, and will always be
 listed here.
 
-## Unreleased
+## 0.3.0 — 2026-09-08
 
 ### Database-per-tenant
 
@@ -33,6 +33,32 @@ database and silently left every other tenant on an old version. The runner now 
 
 Two `default` methods were added to `TenantConnectionStrategy` — `migratesPerTenant()` and
 `dataSourceFor(String)`. Existing implementations keep compiling and behave exactly as before.
+
+### Fixed: the tenant registry no longer routes through the tenant-aware datasource
+
+`TenantRegistryAutoConfiguration` handed `JdbcTenantRegistry` the wrapped datasource, so
+registry reads were routed by whichever tenant happened to be bound. The registry answers
+*which tenants exist* — a question asked before any tenant is known — so routing it by the
+acting tenant was always a contradiction. Under row-level security it happened to work,
+which is why it went unnoticed; under database-per-tenant it throws.
+
+The registry now reads the unwrapped datasource. **This affects every strategy, not only
+the new one.** If you relied on the registry being tenant-routed, you were relying on a bug;
+if you use a single database, nothing changes for you.
+
+`TenantAwareDataSource.unwrap(DataSource)` is now public, since both the registry and the
+migration runner need it.
+
+### Upgrading from 0.2.0
+
+Nothing is required. Every existing property, strategy and interface behaves as before, and
+the two new interface methods are `default`.
+
+If you adopt `DATABASE_PER_TENANT`, set `spring.jpa.database-platform` — see above — and
+note that this strategy fails **louder** than the others when no tenant is bound: row-level
+security returns an empty result set, schema-per-tenant raises an unresolved relation, and
+this throws before a connection exists. An application that quietly copes with empty results
+will start failing visibly. That is a property of the switch, not a regression.
 
 ## 0.2.0 — 2026-09-06
 
